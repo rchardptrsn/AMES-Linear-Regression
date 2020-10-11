@@ -1,0 +1,331 @@
+---
+title: "AMES Housing Data - EDA"
+output:
+  html_document:
+    df_print: paged
+---
+Import packages and the dataset.
+```{r}
+library(ggplot2)
+library(epiDisplay)
+library(dplyr)
+library(visdat)
+library(corrplot)
+options(scipen=10000)
+```
+Import the dataset.
+```{r}
+df <- data.frame(AMES_TRAIN)
+head(df)
+```
+
+
+# Define the sample
+
+1. Select the variables of interest.
+
+```{r}
+df <- df %>% 
+  select(Zoning, LotFrontage, LotArea, BldgType, OverallQual, OverallCond, YearBuilt, YearRemodel, ExterQual, FirstFlrSF, SecondFlrSF, FullBath, HalfBath, BsmtFullBath, BsmtHalfBath, BedroomAbvGr, KitchenQual, GarageArea, SaleCondition, SalePrice, index)
+
+df
+```
+2. let's look at how many records are missing values in our dataset.
+
+```{r}
+vis_miss(df)
+```
+
+3. Subset only properties that are Residential
+
+```{r}
+df <- subset(df, df$Zoning == 'RH' | df$Zoning == 'RL' | df$Zoning == 'RP' | df$Zoning == 'RM')
+```
+
+4. Subset only properties that had normal sale conditions.
+
+```{r}
+df <- subset(df, df$SaleCondition == 'Normal')
+```
+
+
+5. Examine BldgType with a frequency table and histogram. 
+```{r}
+tab1(df$BldgType, sort.group = "decreasing", cum.percent = TRUE)
+```
+__Keep only records that are BldgType = 1Fam.__
+
+```{r}
+df <- df %>% filter(BldgType == "1Fam" | is.na(BldgType))
+```
+
+6. Examine SalePrice and remove outliers. 
+
+```{r}
+summary(df$SalePrice)
+ggplot(df, aes(x=SalePrice)) + geom_histogram(fill='sky blue')
+ggplot(df, aes(y=SalePrice)) + geom_boxplot(fill='sky blue')
+```
+ggplot2 boxplots define outliers above the median as values greater than Q3 + 1.5*IQR. [source - stackoverflow](https://stackoverflow.com/questions/4946964/in-ggplot2-what-do-the-end-of-the-boxplot-lines-represent)
+
+Let's use the [boxplot.stats](https://stat.ethz.ch/R-manual/R-patched/library/grDevices/html/boxplot.stats.html) function to find the minimum, Q2, Median, Q3, and max of the upper whisker. __boxplot.stats__ calculates whisker extremes as: +/-1.58 IQR/sqrt(n) 
+
+```{r}
+bp_stats <- boxplot.stats(df$SalePrice)[1]
+bp_labels <- c('extreme lower whisker','Q2','median','Q3','extreme upper whisker')
+bp_df <- data.frame(bp_stats,bp_labels)
+bp_df
+```
+Now that we have SalePrice outliers defined as above the extreme upper whisker at 345474, lets filter out records above this extreme upper whisker.
+
+```{r}
+df <- df %>% filter(SalePrice <= 345474 | is.na(SalePrice))
+```
+
+
+8. Calculate total square foot area
+
+```{r}
+df$TotSF <- df$FirstFlrSF + df$SecondFlrSF
+```
+
+
+9. Calculate TotalBath
+```{r}
+# drop NAs
+df <- df[!with(df, is.na(BsmtFullBath) & is.na(BsmtHalfBath)),]
+df$TotalBath <- df$FullBath + df$HalfBath + df$BsmtFullBath + df$BsmtHalfBath
+```
+
+10. Check to see if any SalePrice values below zero.
+
+```{r}
+df[df$SalePrice < 0,]
+```
+
+
+11. LotFrontage is the only variable with considerable missing values (18.81% missing).
+
+Let's compare LotFrontage to SalePrice to see if this appears to be a good variable to use in our final regression model.
+
+```{r}
+ggplot(df, aes(x=LotFrontage,y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+LotFrontage looks promising. 
+
+Let's compare LotFrontage to LotArea.
+
+```{r}
+ggplot(df, aes(x=LotArea, y=LotFrontage)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+Let's fill in the NA values in LotFrontage with predicted values from LotArea using a regression model. 
+
+```{r}
+# copy the dataframe so that we are not working on the original
+lf_imp <- df %>% 
+  select(LotFrontage, LotArea) %>% # select rows
+  na.omit() # drop NAs
+
+# Create a linear regression model predicting LotFrontage from LotArea
+lm(LotFrontage ~ LotArea, lf_imp)
+```
+We got an intercept of 48.604608 and slope of 0.002338.
+
+In our original dataset df, let's create a dummy variable for if LotFrontage is NA, using [this code from Rpub.](https://rpubs.com/GourabNath/MissingValue), and predict LotFrontage from LotArea if the value is NA.
+
+```{r}
+# Create a function that will label our dummy variables for a given column
+label_dummies <- function(t)
+{
+  x <- dim(length(t)) 
+  x[which(!is.na(t))] = 1
+  x[which(is.na(t))] = 0
+  return(x)
+}
+
+# Call our function on the dataframe
+df$LFdummy <- label_dummies(df$LotFrontage)
+
+# Impute the missing values using our model.
+
+for(i in 1:nrow(df))
+{
+  if(df$LFdummy[i] == 0)
+  {
+    df$LotFrontage[i] = 48.604608 + 0.002338*df$LotArea[i]
+  }
+}
+```
+
+While we are working on LotFrontage, let's also drop the one record where LotFrontage is greater than 300 feet, as it has an extremely low SalePrice.
+
+```{r}
+df <- subset(df, df$LotFrontage < 300)
+```
+
+# Exploratory Data Analysis - Continuous Variables
+Subset all the continuous variables.
+
+```{r}
+df_con <- df %>% select(LotArea, YearBuilt, TotSF, LotFrontage, GarageArea, SalePrice)
+```
+
+Create a correlogram of the continuous variables.
+```{r}
+library(corrplot)
+
+corrplot(cor(df_con), type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45, addCoef.col = "white")
+```
+Let's investigate the three highest correlations to SalePrice: YearBuilt, GarageArea, TotSF, and LotArea.
+
+X = YearBuilt
+```{r}
+ggplot(df_con, aes(x=YearBuilt, y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+X = GarageArea
+```{r}
+ggplot(df_con, aes(x=GarageArea, y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+X = TotSF
+
+```{r}
+ggplot(df_con, aes(x=TotSF, y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+X = LotArea
+```{r}
+ggplot(df_con, aes(x=LotArea, y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+```
+Let's remove outliers from LotArea, and redraw scatterplot
+```{r}
+df_con_LA <- df_con[df_con$LotArea < 30000,]
+ggplot(df_con_LA, aes(x=LotArea, y=SalePrice)) + 
+  geom_point(shape=16, color='royalblue3') +
+  geom_smooth(method=lm,  linetype="dashed", color="darkred", fill="blue")
+cor(df_con_LA$LotArea, df_con_LA$SalePrice)
+```
+
+# Exploratory Data Analysis - Discrete Variables
+
+```{r}
+df_disc <- df %>% select(TotalBath, BedroomAbvGr, SalePrice)
+```
+
+Boxplot of TotalBath
+```{r}
+p <- df_disc %>% mutate(TotalBath = as.character(TotalBath))
+p<-ggplot(p, aes(x=TotalBath, y=SalePrice, color=TotalBath)) +
+  geom_boxplot()
+p
+```
+Boxplot of BedroomAbvGr
+
+```{r}
+p <- df_disc %>% mutate(BedroomAbvGr = as.character(BedroomAbvGr))
+p<-ggplot(p, aes(x=BedroomAbvGr, y=SalePrice, color=BedroomAbvGr)) +
+  geom_boxplot()
+p
+```
+```{r}
+df[df$BedroomAbvGr == 0,]
+```
+# Exploratory Data Analysis - Ordinal Variable
+```{r}
+df_ord <- df %>% select(OverallQual, ExterQual, KitchenQual, SalePrice)
+```
+
+Boxplot of OverallQual
+```{r}
+p <- df_ord %>% mutate(OverallQual = as.character(OverallQual))
+p<-ggplot(p, aes(x=OverallQual, y=SalePrice, color=OverallQual)) +
+  geom_boxplot()
+p
+```
+Boxplot of ExterQual
+
+```{r}
+p <- df_ord %>% mutate(ExterQual = as.character(ExterQual))
+p<-ggplot(p, aes(x=ExterQual, y=SalePrice, color=ExterQual)) +
+  geom_boxplot()
+p
+```
+Boxplot of KitchenQual
+```{r}
+p <- df_ord %>% mutate(KitchenQual = as.character(KitchenQual))
+p<-ggplot(p, aes(x=KitchenQual, y=SalePrice, color=KitchenQual)) +
+  geom_boxplot()
+p
+```
+# Models
+
+Total Square Feet - TotSF
+
+```{r}
+totsf_lm <- lm(SalePrice ~ TotSF, data=df)
+totsf_lm 
+summary(totsf_lm)
+```
+TotalBath
+
+```{r}
+totalbath_lm <- lm(SalePrice ~ TotalBath, data=df)
+totalbath_lm
+summary(totalbath_lm)
+```
+# Multiple regression
+
+TotSF and TotalBath
+
+```{r}
+sf_bath_lm <- lm(SalePrice ~ TotSF+TotalBath, data=df)
+sf_bath_lm
+summary(sf_bath_lm)
+```
+TotSF and LotFrontage
+```{r}
+sf_lf_lm <- lm(SalePrice ~ TotSF+LotFrontage, data=df)
+sf_lf_lm
+summary(sf_lf_lm)
+```
+
+# Predict SalePrice
+
+Read in test data set.
+
+```{r}
+test <- data.frame(AMES_TEST_SFAM)
+
+# create the calculated variables TotSF and TotalBath
+test$TotSF <- test$FirstFlrSF + test$SecondFlrSF
+test$TotalBath <- test$FullBath + test$HalfBath + test$BsmtFullBath + test$BsmtHalfBath
+```
+
+Predict values
+
+```{r}
+df1 <- test[ ,c("index","p_saleprice","SalePrice","TotSF","TotalBath")]
+p_saleprice <- predict(sf_bath_lm, df1)
+df_out <- data.frame(p_saleprice,test$index)
+head(df_out, n=5)
+```
+
+```{r}
+write.csv(df_out,'~/OneDrive/NORTHWESTERN/Machine Learning/Module 1 - EDA/homework/predicted_test.csv',row.names=TRUE)
+```
+
+
+
+
+
